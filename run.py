@@ -14,6 +14,36 @@ import torch
 import cv2
 from torchvision import transforms as T
 import glob
+import torch.utils.data as D
+
+class OurDataset(D.Dataset):
+    def __init__(self, TifArray):
+        self.TifArray = [i for item in TifArray for i in item]
+        self.len = len(TifArray)*len(TifArray[0])
+
+        self.as_tensor = T.Compose([
+            # 将numpy的ndarray转换成形状为(C,H,W)的Tensor格式,且/255归一化到[0,1.0]之间
+            T.ToTensor(),
+        ])
+    # 获取数据操作
+    def __getitem__(self, index):
+        
+        image = self.TifArray[index]
+        image_A = image[:,:,0:3]
+        image_B = image[:,:,3:6]
+        image_B_fromA= style_transfer(image_B, image_A)
+        image = np.concatenate((image_A,image_B_fromA),axis=2)
+        
+        return self.as_tensor(image)
+    # 数据集数量
+    def __len__(self):
+        return self.len
+
+def get_dataloader(TifArray, batch_size, shuffle=False, num_workers=8):
+    dataset = OurDataset(TifArray)
+    dataloader = D.DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, 
+                              num_workers=num_workers, pin_memory=True)
+    return dataloader
 
 def style_transfer(source_image, target_image):
     h, w, c = source_image.shape
@@ -145,6 +175,11 @@ def test_bigImage(TifPath_A, TifPath_B, model_paths, ResultPath,RepetitiveLength
     big_image_B = cv2.imread(TifPath_B, cv2.IMREAD_UNCHANGED)
     big_image_B = cv2.cvtColor(big_image_B, cv2.COLOR_BGR2RGB)
     
+    
+#     big_image_B_fromA= style_transfer(big_image_B, big_image_A)
+#     big_image = np.concatenate((big_image_A,big_image_B_fromA),axis=2)
+    
+    
     big_image = np.concatenate((big_image_A,big_image_B),axis=2)
     
     TifArray, RowOver, ColumnOver = TifCroppingArray(big_image, RepetitiveLength)
@@ -167,44 +202,92 @@ def test_bigImage(TifPath_A, TifPath_B, model_paths, ResultPath,RepetitiveLength
     model.to(DEVICE)
     
     predicts = []
-    for i in range(len(TifArray)):
-        for j in range(len(TifArray[0])):
-            image = TifArray[i][j]
-            
-            image_A = image[:,:,0:3]
-            image_B = image[:,:,3:6]
-            image_B_fromA= style_transfer(image_B, image_A)
-            image = np.concatenate((image_A,image_B_fromA),axis=2)
-            
-            image = trfm(image)
-            image = image.cuda()[None]
-            pred = np.zeros((1,1,512,512))
-            for model_path in model_paths:
-                model.load_state_dict(torch.load(model_path))
-                model.eval()
+    
+    test_loader = get_dataloader(TifArray, batch_size=64)
+    
+    # weights = [1.5,1]
+    for image in test_loader:
+        
+        model.to(DEVICE)
+        output = np.zeros((image.shape[0],1,512,512))
+        for model_path_ind, model_path in enumerate(model_paths):
+            model.load_state_dict(torch.load(model_path))
+            model.eval()
+            with torch.no_grad():
                 
-                with torch.no_grad():
-                    
-                    pred1 = model(image).cpu().numpy()
+                image = image.cuda()
+                
+#                 output1 = model(image).cpu().numpy()
             
-                    pred2 = model(torch.flip(image, [0, 3]))
-                    pred2 = torch.flip(pred2, [3, 0]).cpu().numpy()
+#                 output2 = model(torch.flip(image, [0, 3]))
+#                 output2 = torch.flip(output2, [3, 0]).cpu().numpy()
             
-                    pred3 = model(torch.flip(image, [0, 2]))
-                    pred3 = torch.flip(pred3, [2, 0]).cpu().numpy()
+#                 output3 = model(torch.flip(image, [0, 2]))
+#                 output3 = torch.flip(output3, [2, 0]).cpu().numpy()
                     
-                    pred4 = model(torch.flip(torch.flip(image, [0, 3]), [0, 2]))
-                    pred4 = torch.flip(torch.flip(pred4, [2, 0]), [3, 0]).cpu().numpy()
-                    
-                    pred += pred1 + pred2 + pred3 + pred4
-                    
-            pred = pred / (len(model_paths) * 4)
+#                 output4 = model(torch.flip(torch.flip(image, [0, 3]), [0, 2]))
+#                 output4 = torch.flip(torch.flip(output4, [2, 0]), [3, 0]).cpu().numpy()
+                
+                output1 = model(image).cpu().data.numpy()
+                
+            # output += output1 + output2 + output3 + output4
+            output += output1
+            # output += output1*weights[model_path_ind]
+        
+        # output = output / (len(model_paths)*4)
+        output = output / (len(model_paths)*1)
+        # output = output / 2.5
+        
+        # output.shape: batch_size,classes,512,512
+        for i in range(output.shape[0]):
+            pred = output[i]
             threshold = 0.21
             pred[pred>=threshold] = 1
             pred[pred<threshold] = 0
-            pred = pred.astype(np.uint8)
+            pred = np.uint8(pred)
             pred = pred.reshape((512,512))
             predicts.append((pred))
+    
+    
+#     for i in range(len(TifArray)):
+#         for j in range(len(TifArray[0])):
+#             image = TifArray[i][j]
+            
+#             image_A = image[:,:,0:3]
+#             image_B = image[:,:,3:6]
+#             image_B_fromA= style_transfer(image_B, image_A)
+#             image = np.concatenate((image_A,image_B_fromA),axis=2)
+            
+#             image = trfm(image)
+#             image = image.cuda()[None]
+#             pred = np.zeros((1,1,512,512))
+#             for model_path in model_paths:
+#                 model.load_state_dict(torch.load(model_path))
+#                 model.eval()
+                
+#                 with torch.no_grad():
+                    
+#                     pred1 = model(image).cpu().numpy()
+            
+# #                     pred2 = model(torch.flip(image, [0, 3]))
+# #                     pred2 = torch.flip(pred2, [3, 0]).cpu().numpy()
+            
+# #                     pred3 = model(torch.flip(image, [0, 2]))
+# #                     pred3 = torch.flip(pred3, [2, 0]).cpu().numpy()
+                    
+# #                     pred4 = model(torch.flip(torch.flip(image, [0, 3]), [0, 2]))
+# #                     pred4 = torch.flip(torch.flip(pred4, [2, 0]), [3, 0]).cpu().numpy()
+                    
+#                     # pred += pred1 + pred2 + pred3 + pred4
+#                     pred += pred1
+                    
+            # pred = pred / (len(model_paths) * 1)
+            # threshold = 0.21
+            # pred[pred>=threshold] = 1
+            # pred[pred<threshold] = 0
+            # pred = pred.astype(np.uint8)
+            # pred = pred.reshape((512,512))
+            # predicts.append((pred))
     
     #保存结果predictspredicts
     result_shape = (big_image.shape[0], big_image.shape[1])
@@ -215,10 +298,11 @@ def test_bigImage(TifPath_A, TifPath_B, model_paths, ResultPath,RepetitiveLength
 if __name__ == "__main__":
     start_time = time.time()
     model_paths = [
-        "UnetPlusPlus_efficientnetb0_FFT_copy_Agu_edge_105_fold_0.pth",
-        "UnetPlusPlus_efficientnetb0_FFT_copy_Agu_edge_105_fold_1.pth",
-        "UnetPlusPlus_efficientnetb0_FFT_copy_Agu_edge_105_fold_2.pth",
-        "UnetPlusPlus_efficientnetb0_FFT_copy_Agu_edge_105_fold_4.pth",
+        "/save_dir/UnetPlusPlus_efficientnetb0_FFT_copy_Agu_edge_120_fold_2.pth",
+        "/save_dir/UnetPlusPlus_efficientnetb0_FFT_copy_Agu_edge_120_fold_4.pth",
+        # "UnetPlusPlus_efficientnetb0_FFT_copy_Agu_edge_105_fold_1.pth",
+        # "UnetPlusPlus_efficientnetb0_FFT_copy_Agu_edge_105_fold_2.pth",
+        # "UnetPlusPlus_efficientnetb0_FFT_copy_Agu_edge_105_fold_4.pth",
         ]
     RepetitiveLength = 100
     # output_dir = r"E:\WangZhenQing\2021ShengTeng\data\test_AB_big"
@@ -234,5 +318,5 @@ if __name__ == "__main__":
         ResultPath = os.path.join(output_dir, image_name.replace("tif","png"))
         
         test_bigImage(image_A_path, image_B_path, model_paths, ResultPath,RepetitiveLength)
-    print((time.time()-start_time)/60/60)
+    print((time.time()-start_time))
     
